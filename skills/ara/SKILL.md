@@ -35,6 +35,7 @@ It replaces `llms.txt` with a structured 3-layer architecture.
 | `/ara migrate <url>` | Convert existing llms.txt to ARA | ara-auditor → ara-transformer |
 | `/ara validate <url>` | Run npx ara-validate, return score | Bash only |
 | `/ara geo <url>` | Optimize digest.md for AI citability | ara-transformer (--geo) |
+| `/ara monitor <url>` | Measure GEO impact — citations, accuracy, bot traffic | ara-monitor |
 | `/ara quick <url>` | 30-second ARA readiness snapshot | ara-auditor |
 | `/ara` | Show this help | — |
 

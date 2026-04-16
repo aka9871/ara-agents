@@ -39,13 +39,14 @@ when enough sites redirect AI bots to structured ARA content, every major LLM co
 
 ---
 
-## The Three Agents
+## The Four Agents
 
 | Agent | What it does | When to use |
 |-------|-------------|-------------|
 | `ara-auditor` | Scores ARA compliance A-F, detects llms.txt | Before transforming |
 | `ara-transformer` | Generates manifest.json, schemas/, actions.json, digest.md | Making a site ARA-ready |
 | `ara-enforcer` | Injects signals that force AI bots to use ARA | After ARA files exist |
+| `ara-monitor` | Measures GEO impact — citations, accuracy, bot traffic | After 7+ days live |
 
 ---
 
@@ -432,6 +433,8 @@ The recommended full workflow:
 /ara transform <url>  →  generates ARA files
 /ara enforce <url>    →  forces AI bots to use them
 /ara audit <url>      →  verifies everything is working
+# — wait 7-14 days —
+/ara monitor <url>    →  measures GEO impact (citations, accuracy, bot traffic)
 ```
 
 ---
