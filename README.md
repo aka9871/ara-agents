@@ -399,6 +399,332 @@ See [`middleware/README.md`](middleware/README.md) for the full technical explan
 
 ---
 
+## How ara-monitor Works
+
+> "How do I know ARA is actually helping my GEO?"
+>
+> That question has no good answer with `llms.txt`. With ARA, it does — because ARA gives you a verifiable ground truth.
+
+### The core insight: ARA as a test suite
+
+Every ARA-ready site contains three types of **declared facts**:
+
+- `digest.md` — facts the AI *should* know: "3,200 products, ships to 45 countries, founded 2019"
+- `schemas/*.json` — the exact structure of every data type
+- `actions.json` — the exact questions users ask: "find laptops under $1000", "show me wireless headphones"
+
+`ara-monitor` uses these declared facts as a **test suite**. It submits the intents as real queries to AI search engines, then compares the answers against the ARA ground truth. The gap between what ARA declares and what AI engines actually say is your GEO score.
+
+This is measurement that `llms.txt` can never provide — because it has no ground truth.
+
+---
+
+### The 7-step pipeline
+
+```
+                    ┌─────────────────────────────────────────┐
+                    │           ara-monitor pipeline           │
+                    └─────────────────────────────────────────┘
+
+  Step 1            Step 2            Step 3            Step 4
+  ────────          ────────          ────────          ────────
+  Load ARA     →   Parse server  →   Score ARA    →   Run AI
+  ground truth      access logs       file health       citation probes
+
+  "What should      "Are AI bots      "Are your ARA     "Are AI engines
+  AI know?"         finding ARA?"     files fresh?"     citing you?"
+
+  Step 5            Step 6            Step 7
+  ────────          ────────          ────────
+  Semantic     →   Compare vs   →   Save report +
+  accuracy          previous          recommendations
+  check             run
+
+  "What do they     "Is it           .ara-monitoring/
+  actually say?"    improving?"      report-YYYY-MM-DD.json
+```
+
+---
+
+### Step 1 — Build the ground truth
+
+The agent reads your ARA files to build the expected facts:
+
+```
+manifest.json  → site identity, resource counts, declared protocols
+digest.md      → key facts: every sentence containing a number, price, date, or proper noun
+actions.json   → intents[].examples → these become AI search queries
+schemas/*.json → field definitions with Schema.org mappings
+```
+
+Example — what gets extracted from a fashion ecommerce `digest.md`:
+
+```markdown
+# UrbanStyle — Agent Digest
+## Identity
+3,200+ products. Founded 2019, New York. Ships to 45 countries.
+Prices: $45 (entry) to $380 (premium). Average rating 4.6/5.
+```
+
+Extracted facts (the test checklist):
+```
+fact_1: "3,200+ products"
+fact_2: "founded 2019"
+fact_3: "ships to 45 countries"
+fact_4: "price from $45"
+fact_5: "rating 4.6/5"
+```
+
+---
+
+### Step 2 — Server log analysis
+
+The agent parses your web server access logs to answer: **are AI bots finding and using your ARA files?**
+
+```bash
+# What the agent runs (nginx example)
+grep -iE "GPTBot|ClaudeBot|PerplexityBot|Google-Extended" access.log \
+  | grep -oiE "GPTBot|ClaudeBot|PerplexityBot|Google-Extended" \
+  | sort | uniq -c | sort -rn
+
+# Did the 302 redirect work?
+grep -iE "GPTBot|ClaudeBot" access.log | grep " 302 " | wc -l
+
+# Did bots actually read digest.md?
+grep "/.well-known/ara/digest.md" access.log | grep " 200 " | wc -l
+
+# Did any bot go directly to manifest.json? (knows ARA natively)
+grep "/.well-known/ara/manifest.json" access.log | grep " 200 " | wc -l
+```
+
+**What the numbers mean:**
+
+| Metric | What it tells you |
+|--------|-------------------|
+| `bot_visits_total` | How often AI bots index your site |
+| `redirect_rate` | % of bot visits caught by `ara-enforcer` — should be >80% |
+| `digest_reads` | How many bots successfully read the ARA digest |
+| `manifest_reads` | Bots that found ARA *without* the redirect — native ARA support |
+
+**The signal you want to see grow over time:**
+`manifest_reads` increasing means AI companies are starting to check `/.well-known/ara/manifest.json` natively. That's ARA becoming a standard.
+
+---
+
+### Step 3 — ARA file health score
+
+Before running the citation probes, the agent checks whether your ARA files are fresh and complete enough to produce accurate results. A stale `digest.md` will produce misleading accuracy scores.
+
+```
+manifest.json health (40 pts):
+  - Is meta.generated_at recent? (< 30 days = fresh, > 90 days = stale)
+  - Do resource counts match reality?
+  - Is identity.description factual? (no adjectives like "powerful", "innovative")
+  - Are declared protocols actually implemented?
+
+digest.md health (20 pts):
+  - Token count: 200–400 tokens (under 150 = too sparse, over 500 = too verbose)
+  - Fact density: target 1 specific fact per sentence (number, name, price, date)
+  - Does it mention the most important things for your site type?
+    (ecommerce: prices + counts; SaaS: pricing plans + features; local: hours + location)
+
+actions.json health (20 pts):
+  - Every intent has 3+ natural language examples
+  - Actions cover the main user intents for your site type
+  - Protocols declared match what's actually available
+
+schemas/ health (20 pts):
+  - Every field has a Schema.org `semantic` annotation
+  - search_hints defined for all catalog resources
+  - Relationships between resources declared
+```
+
+A low health score before running citation probes means: fix your ARA files first, then measure.
+
+---
+
+### Step 4 — AI citation probes (the core measurement)
+
+This is where the magic happens. The agent takes the `intents[].examples` from `actions.json` and submits them as **real queries to AI search engines**.
+
+**Why intents are perfect test probes:**
+The intent examples were written to represent what real users ask. If a user says "find laptops under $1000" to ChatGPT, and ChatGPT browses the web to answer — is your site in the results? That's exactly what the probe tests.
+
+**The probe flow:**
+
+```
+actions.json intent:
+  "examples": ["find laptops under $1000", "wireless headphones comparison", "gaming monitor 4K"]
+                         ↓
+Agent selects the most site-specific example:
+  → "find laptops under $1000 at TechStore"  (too generic without site name)
+  → "TechStore laptop recommendations"        (site-specific = traceable)
+                         ↓
+WebFetch → Perplexity search results page
+WebFetch → Google search (check for AI Overview)
+                         ↓
+Parse response:
+  - Is "techstore.com" in sources? → site_cited = true/false
+  - Does the answer mention "3,200 products"? → fact accuracy check
+  - Does the answer match the price range from digest.md?
+```
+
+**Probe selection strategy:**
+
+| Probe type | Example | When to use |
+|-----------|---------|-------------|
+| Brand + category | "UrbanStyle winter coats" | Always — traceable to your site |
+| Unique fact | "which fashion store ships to 45 countries" | When you have a distinctive differentiator |
+| Price probe | "fashion store under $100 dresses New York" | Ecommerce |
+| Feature probe | "project management tool with free tier and API" | SaaS |
+| Location probe | "boulangerie artisanale Lyon centre" | Local business |
+
+**What gets recorded per probe:**
+
+```json
+{
+  "query": "UrbanStyle winter coats 2026",
+  "engine": "perplexity",
+  "site_cited": true,
+  "citation_url": "https://urbanstyle.fashion/outerwear",
+  "answer_excerpt": "UrbanStyle offers 290 outerwear products from $89 to $650...",
+  "accuracy_checks": [
+    { "fact": "290 outerwear products", "found": true,  "accurate": true  },
+    { "fact": "ships to 45 countries",  "found": false, "accurate": false }
+  ]
+}
+```
+
+---
+
+### Step 5 — Semantic accuracy analysis
+
+The agent compares every specific fact in `digest.md` against what AI engines actually said in the probe answers.
+
+```
+ARA declares              AI answer says              Classification
+──────────────────────────────────────────────────────────────────────
+"3,200+ products"    →   "over 3,000 products"   →  APPROXIMATE (+1 pt)
+"ships to 45 cntrs"  →   "international shipping" →  VAGUE      ( 0 pt)
+"founded 2019"       →   "established 2021"       →  INACCURATE (-1 pt) ⚠
+"price from $45"     →   not mentioned            →  MISSING    ( 0 pt)
+"rating 4.6/5"       →   "highly rated brand"     →  VAGUE      ( 0 pt)
+```
+
+**Scoring:**
+- `exact` +2 pts — AI answer matches ARA data precisely
+- `approximate` +1 pt — close but not exact ("over 3,000" vs "3,200+")
+- `vague` 0 pts — mentioned in general terms without specific data
+- `missing` 0 pts — not covered in AI answer at all
+- `inaccurate` -1 pt — AI contradicts ARA data ← **action required**
+
+**What each result means:**
+
+**INACCURATE** is the most important signal. It means one of two things:
+1. Your `digest.md` is outdated — the AI scraped more recent data than your ARA files contain. → Run `/ara geo` to refresh.
+2. The AI engine has wrong data in its index and hasn't picked up your ARA content yet. → Check that enforcement is working, wait 14 days, re-run.
+
+**VAGUE** means the AI engine is summarizing rather than citing specific ARA data. Usually fixed by making `digest.md` denser: replace "affordable prices" with "$45–$380".
+
+**MISSING** means the AI engine answered the query without mentioning that fact. Either the probe query doesn't surface that fact, or the fact isn't prominent enough in `digest.md`. Move it to the first paragraph.
+
+---
+
+### Step 6 — Trend analysis
+
+Every run saves a structured JSON report to `.ara-monitoring/report-YYYY-MM-DD.json`. On each subsequent run, the agent loads the most recent previous report and computes deltas:
+
+```
+Report 1 (baseline, 2026-04-16):
+  citation_rate: 14%  |  accuracy: 62/100  |  digest_reads: 203
+
+Report 2 (14 days later, 2026-04-30):
+  citation_rate: 29%  |  accuracy: 74/100  |  digest_reads: 441
+
+Delta:
+  citation_rate: ▲ +107%   ← ARA enforcement is working
+  accuracy:      ▲ +19%    ← digest.md update improved accuracy
+  digest_reads:  ▲ +117%   ← more bots reading ARA content
+```
+
+The trend is what matters. A single report is a snapshot. The trend shows whether ARA is creating a sustainable GEO advantage.
+
+**The expected trajectory after ARA + enforcement deployment:**
+
+```
+Week 1–2:   Bots discover the redirect → digest_reads increases
+Week 3–4:   ARA content appears in AI index → citation_rate starts increasing
+Week 5–8:   Accuracy improves as AI engines use ARA data → accuracy_score increases
+Week 9+:    manifest_reads increases → bots start checking ARA natively
+```
+
+---
+
+### Step 7 — Report and recommendations
+
+The agent generates two outputs:
+
+**1. Human-readable terminal report:**
+```
+━━━ ARA GEO Impact Report — UrbanStyle ━━━━━━━━━━━━
+2026-04-30 | Period: 30 days | ▲ +12% vs 2026-04-16
+
+  ARA Health:        87/100   ▲ +4
+  AI Citation Rate:  43%      ▲ +15%   (3/7 queries)
+  Semantic Accuracy: 71/100   ▲ +9
+
+── Server Signals ──────────────────────────────────
+  Bot visits: 847  |  digest.md reads: 621 (73%)
+  GPTBot: 312  ClaudeBot: 189  PerplexityBot: 156
+  Manifest direct reads: 12 ← bots that know ARA
+
+── Citation Probes ──────────────────────────────────
+  Perplexity: 3/5 queries cite site  ✓
+  Google AIO: 1/5 queries            △
+  Claude:     2/5 queries            △
+
+── Semantic Accuracy ────────────────────────────────
+  ✓ "3,200+ products"    → AI says "over 3,000"   APPROXIMATE
+  ✓ "ships to 45 cntrs"  → AI says "45 countries" EXACT
+  ✗ "founded 2019"       → AI says "est. 2021"    INACCURATE ← fix
+
+── Top 3 Recommendations ────────────────────────────
+  1. Update digest.md: "Founded 2019" (AI says 2021 — stale data)
+  2. Google AIO underperforming: add FAQ schema to homepage
+  3. 4 bots never detected: check robots.txt for Facebook/Apple
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+```
+
+**2. Structured JSON report** saved to `.ara-monitoring/report-YYYY-MM-DD.json` for historical tracking and programmatic analysis.
+
+---
+
+### The improvement loop
+
+`ara-monitor` is designed to feed back into the other agents:
+
+```
+/ara monitor → "digest.md fact 'founded 2019' is INACCURATE — AI says 2021"
+                    ↓
+/ara geo     → refreshes digest.md with current data
+                    ↓
+# wait 14 days
+/ara monitor → accuracy_score improves
+```
+
+```
+/ara monitor → "citation_rate 14% — digest.md too vague, no specific prices"
+                    ↓
+/ara geo     → adds "$45–$380 price range, 290 outerwear products"
+                    ↓
+# wait 14 days
+/ara monitor → Perplexity starts citing specific prices → accuracy ▲
+```
+
+This creates a **closed feedback loop** between what ARA declares, what AI engines index, and what users see in AI search results.
+
+---
+
 ## Architecture
 
 Three specialized agents, one skill:
